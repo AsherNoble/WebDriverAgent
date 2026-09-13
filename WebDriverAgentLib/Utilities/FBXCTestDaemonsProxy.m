@@ -104,6 +104,13 @@ static void swizzledLaunchApp(id self, SEL _cmd, NSString *path, NSString *bundl
 
 + (BOOL)synthesizeEventWithRecord:(XCSynthesizedEventRecord *)record error:(NSError *__autoreleasing*)error
 {
+  return [self synthesizeEventWithRecord:record timing:nil error:error];
+}
+
++ (BOOL)synthesizeEventWithRecord:(XCSynthesizedEventRecord *)record
+                           timing:(NSMutableDictionary *)timing
+                            error:(NSError *__autoreleasing*)error
+{
   __block NSError *innerError = nil;
   [FBRunLoopSpinner spinUntilCompletion:^(void(^completion)(void)){
     void (^errorHandler)(NSError *) = ^(NSError *invokeError) {
@@ -116,7 +123,16 @@ static void swizzledLaunchApp(id self, SEL _cmd, NSString *path, NSString *bundl
     XCEventGeneratorHandler handlerBlock = ^(XCSynthesizedEventRecord *innerRecord, NSError *invokeError) {
       errorHandler(invokeError);
     };
-    [[XCUIDevice.sharedDevice eventSynthesizer] synthesizeEvent:record completion:(id)^(BOOL result, NSError *invokeError) {
+    id eventSynthesizer = [XCUIDevice.sharedDevice eventSynthesizer];
+    FBMarkActionTiming(timing, @"submitted_to_ios");
+    [eventSynthesizer synthesizeEvent:record completion:(id)^(BOOL result, NSError *invokeError) {
+      FBMarkActionTiming(timing, @"ios_completion_callback");
+      if (nil != timing) {
+        @synchronized (timing) {
+          timing[@"ios_callback_result"] = @(result);
+          if (nil != invokeError) { timing[@"ios_callback_error"] = invokeError.localizedDescription; }
+        }
+      }
       handlerBlock(record, invokeError);
     }];
   }];

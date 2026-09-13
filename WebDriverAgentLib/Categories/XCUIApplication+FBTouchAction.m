@@ -36,8 +36,10 @@
 - (BOOL)fb_performActionsWithSynthesizerType:(Class)synthesizerType
                                      actions:(NSArray *)actions
                                 elementCache:(FBElementCache *)elementCache
+                                      timing:(NSMutableDictionary *)timing
                                        error:(NSError **)error
 {
+  FBMarkActionTiming(timing, @"preparation_started");
   FBBaseActionsSynthesizer *synthesizer = [[synthesizerType alloc] initWithActions:actions
                                                                     forApplication:self
                                                                       elementCache:elementCache
@@ -49,20 +51,32 @@
   if (nil == eventRecord) {
     return [self.class handleEventSynthesWithError:*error];
   }
-  return [self fb_synthesizeEvent:eventRecord error:error];
+  FBMarkActionTiming(timing, @"preparation_finished");
+  return [FBXCTestDaemonsProxy synthesizeEventWithRecord:eventRecord timing:timing error:error];
 }
 
 - (BOOL)fb_performW3CActions:(NSArray *)actions
                 elementCache:(FBElementCache *)elementCache
                        error:(NSError **)error
 {
+  return [self fb_performW3CActions:actions elementCache:elementCache timing:nil error:error];
+}
+
+- (BOOL)fb_performW3CActions:(NSArray *)actions
+                elementCache:(FBElementCache *)elementCache
+                      timing:(NSMutableDictionary *)timing
+                       error:(NSError **)error
+{
   if (![self fb_performActionsWithSynthesizerType:FBW3CActionsSynthesizer.class
                                           actions:actions
                                      elementCache:elementCache
+                                           timing:timing
                                             error:error]) {
     return NO;
   }
+  FBMarkActionTiming(timing, @"stability_wait_started");
   [self fb_waitUntilStableWithTimeout:FBConfiguration.animationCoolOffTimeout];
+  FBMarkActionTiming(timing, @"stability_wait_finished");
   return YES;
 }
 

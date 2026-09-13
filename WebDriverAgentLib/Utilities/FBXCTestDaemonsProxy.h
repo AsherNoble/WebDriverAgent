@@ -16,6 +16,17 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/** Diagnostic stamps are observation boundaries, not physical contact times. */
+NS_INLINE void FBMarkActionTiming(NSMutableDictionary * _Nullable timing, NSString *name)
+{
+  if (nil == timing) { return; }
+  NSTimeInterval monotonic = NSProcessInfo.processInfo.systemUptime;
+  NSTimeInterval epoch = NSDate.date.timeIntervalSince1970;
+  @synchronized (timing) {
+    timing[name] = @{@"monotonic_s": @(monotonic), @"epoch_s": @(epoch)};
+  }
+}
+
 @protocol XCTestManager_ManagerInterface;
 @class FBScreenRecordingRequest, FBScreenRecordingPromise;
 
@@ -24,6 +35,10 @@ NS_ASSUME_NONNULL_BEGIN
 + (id<XCTestManager_ManagerInterface>)testRunnerProxy;
 
 + (BOOL)synthesizeEventWithRecord:(XCSynthesizedEventRecord *)record
+                            error:(NSError *__autoreleasing*)error;
+
++ (BOOL)synthesizeEventWithRecord:(XCSynthesizedEventRecord *)record
+                           timing:(nullable NSMutableDictionary *)timing
                             error:(NSError *__autoreleasing*)error;
 
 + (BOOL)openURL:(NSURL *)url usingApplication:(NSString *)bundleId error:(NSError **)error;

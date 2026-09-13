@@ -24,6 +24,10 @@ NS_ASSUME_NONNULL_BEGIN
  */
 - (BOOL)fb_performW3CActions:(NSArray *)actions elementCache:(nullable FBElementCache *)elementCache error:(NSError * _Nullable*)error;
 
+/** Optional request-local diagnostic capture; execution semantics are unchanged. */
+- (BOOL)fb_performW3CActions:(NSArray *)actions elementCache:(nullable FBElementCache *)elementCache
+                     timing:(nullable NSMutableDictionary *)timing error:(NSError * _Nullable*)error;
+
 @end
 
 NS_ASSUME_NONNULL_END

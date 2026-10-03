@@ -13,7 +13,10 @@
 #import "FBRoute.h"
 #import "FBRouteRequest.h"
 #import "FBSession.h"
+#import "FBRunLoopSpinner.h"
 #import "FBXCTestDaemonsProxy.h"
+#import "XCTRunnerDaemonSession.h"
+#import "XCUIDevice.h"
 #import "XCUIApplication.h"
 #import "XCPointerEventPath.h"
 #import "XCSynthesizedEventRecord.h"
@@ -27,7 +30,130 @@
   return
   @[
     [[[FBRoute POST:@"/wda/perform_trick_gestures"] withoutSession] respondWithTarget:self action:@selector(handlePerformTrickGestures:)],
+    [[[FBRoute POST:@"/wda/perform_gesture_schedule"] withoutSession] respondWithTarget:self action:@selector(handlePerformGestureSchedule:)],
   ];
+}
+
+#pragma mark - Gesture schedule
+
+/*
+ Sequential touch contacts must not share one XCSynthesizedEventRecord: extra
+ paths run as parallel tracks and hover moves emit touches, so True Skate joins
+ the gestures into one chain. Separate HTTP requests avoid that but each returns
+ ~0.3 s after its gesture ends. This endpoint builds one record per gesture and
+ submits each at its scheduled time from the main run loop without waiting for
+ earlier records to complete.
+ */
++ (nullable NSArray<NSDictionary<NSString *, id> *> *)gestureSchedulePlanFromArguments:(NSDictionary *)arguments
+                                                                         errorMessage:(NSString **)errorMessage
+{
+  id gestures = arguments[@"gestures"];
+  if (![gestures isKindOfClass:NSArray.class] || [gestures count] == 0) {
+    if (errorMessage) { *errorMessage = @"'gestures' must be a non-empty array"; }
+    return nil;
+  }
+  NSMutableArray<NSDictionary<NSString *, id> *> *plan = [NSMutableArray array];
+  for (NSUInteger gestureIndex = 0; gestureIndex < [gestures count]; gestureIndex++) {
+    id gesture = gestures[gestureIndex];
+    id start = [gesture isKindOfClass:NSDictionary.class] ? gesture[@"start_ms"] : nil;
+    id waypoints = [gesture isKindOfClass:NSDictionary.class] ? gesture[@"waypoints"] : nil;
+    if (![start isKindOfClass:NSNumber.class] || [start doubleValue] < 0) {
+      if (errorMessage) { *errorMessage = [NSString stringWithFormat:@"Gesture %lu needs a non-negative 'start_ms'", (unsigned long)gestureIndex]; }
+      return nil;
+    }
+    if (![waypoints isKindOfClass:NSArray.class] || [waypoints count] < 2) {
+      if (errorMessage) { *errorMessage = [NSString stringWithFormat:@"Gesture %lu must have at least 2 waypoints", (unsigned long)gestureIndex]; }
+      return nil;
+    }
+    NSMutableArray<NSValue *> *points = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *offsets = [NSMutableArray array];
+    double offset = 0;
+    for (NSUInteger waypointIndex = 0; waypointIndex < [waypoints count]; waypointIndex++) {
+      NSString *problem = [self errorDescriptionForWaypoint:waypoints[waypointIndex]
+                                              waypointIndex:waypointIndex
+                                               gestureIndex:gestureIndex
+                                          isFirstWaypoint:waypointIndex == 0];
+      if (nil != problem) {
+        if (errorMessage) { *errorMessage = problem; }
+        return nil;
+      }
+      NSDictionary *waypoint = waypoints[waypointIndex];
+      if (waypointIndex > 0) {
+        double duration = [waypoint[@"duration_ms"] doubleValue];
+        if (duration <= 0) {
+          if (errorMessage) { *errorMessage = [NSString stringWithFormat:@"Gesture %lu waypoint %lu needs a positive 'duration_ms'", (unsigned long)gestureIndex, (unsigned long)waypointIndex]; }
+          return nil;
+        }
+        offset += duration / 1000.0;
+      }
+      [points addObject:[NSValue valueWithCGPoint:CGPointMake([waypoint[@"x"] doubleValue], [waypoint[@"y"] doubleValue])]];
+      [offsets addObject:@(offset)];
+    }
+    [plan addObject:@{@"start_s": @([start doubleValue] / 1000.0), @"points": points.copy, @"offsets_s": offsets.copy}];
+  }
+  return plan.copy;
+}
+
++ (id<FBResponsePayload>)handlePerformGestureSchedule:(FBRouteRequest *)request
+{
+  NSString *problem = nil;
+  NSArray<NSDictionary<NSString *, id> *> *plan = [self gestureSchedulePlanFromArguments:request.arguments errorMessage:&problem];
+  if (nil == plan) {
+    return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:problem traceback:nil]);
+  }
+
+  NSMutableArray<XCSynthesizedEventRecord *> *records = [NSMutableArray array];
+  double lastEnd = 0;
+  for (NSDictionary<NSString *, id> *entry in plan) {
+    NSArray<NSValue *> *points = entry[@"points"];
+    NSArray<NSNumber *> *offsets = entry[@"offsets_s"];
+    XCPointerEventPath *path = [[XCPointerEventPath alloc] initForTouchAtPoint:points.firstObject.CGPointValue offset:0.0];
+    for (NSUInteger i = 1; i < points.count; i++) {
+      [path moveToPoint:points[i].CGPointValue atOffset:offsets[i].doubleValue];
+    }
+    [path liftUpAtOffset:offsets.lastObject.doubleValue];
+    XCSynthesizedEventRecord *record = [[XCSynthesizedEventRecord alloc] initWithName:@"ScheduledGesture"
+                                                                  interfaceOrientation:UIInterfaceOrientationPortrait];
+    [record addPointerEventPath:path];
+    [records addObject:record];
+    lastEnd = MAX(lastEnd, [entry[@"start_s"] doubleValue] + offsets.lastObject.doubleValue);
+  }
+
+  id eventSynthesizer = [XCUIDevice.sharedDevice eventSynthesizer];
+  NSMutableArray<NSMutableDictionary *> *timings = [NSMutableArray array];
+  __block NSUInteger completed = 0;
+  NSObject *lock = [NSObject new];
+  // Small lead so the first submission is not late relative to the base time.
+  NSTimeInterval base = NSProcessInfo.processInfo.systemUptime + 0.02;
+  NSTimeInterval baseEpoch = NSDate.date.timeIntervalSince1970 + 0.02;
+  for (NSUInteger i = 0; i < records.count; i++) {
+    NSMutableDictionary *timing = [@{@"index": @(i), @"scheduled_s": plan[i][@"start_s"]} mutableCopy];
+    [timings addObject:timing];
+    XCSynthesizedEventRecord *record = records[i];
+    double delay = base + [plan[i][@"start_s"] doubleValue] - NSProcessInfo.processInfo.systemUptime;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MAX(0, delay) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      @synchronized (lock) { timing[@"submitted_s"] = @(NSProcessInfo.processInfo.systemUptime - base); }
+      [eventSynthesizer synthesizeEvent:record completion:(id)^(BOOL result, NSError *invokeError) {
+        @synchronized (lock) {
+          timing[@"completed_s"] = @(NSProcessInfo.processInfo.systemUptime - base);
+          timing[@"result"] = @(result);
+          if (nil != invokeError) { timing[@"error"] = invokeError.localizedDescription; }
+          completed++;
+        }
+      }];
+    });
+  }
+  BOOL finished = [[[[FBRunLoopSpinner new] timeout:lastEnd + 10.0] interval:0.005] spinUntilTrue:^BOOL{
+    @synchronized (lock) { return completed == records.count; }
+  }];
+  NSArray *report;
+  @synchronized (lock) { report = [[NSArray alloc] initWithArray:timings copyItems:YES]; }
+  return FBResponseWithObject(@{
+    @"complete": @(finished),
+    @"base_monotonic_s": @(base),
+    @"base_epoch_s": @(baseEpoch),
+    @"gestures": report,
+  });
 }
 
 #pragma mark - Commands

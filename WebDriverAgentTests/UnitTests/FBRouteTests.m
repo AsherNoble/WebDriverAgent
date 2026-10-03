@@ -10,6 +10,7 @@
 
 #import "FBRoute.h"
 #import "FBTouchActionCommands.h"
+#import "FBTrickGestureCommands.h"
 #import "FBXCTestDaemonsProxy.h"
 
 @interface FBTouchActionCommands (TimingTests)
@@ -219,6 +220,63 @@
   snapshot = [[FBTouchActionCommands handleGetActionTiming:request] valueForKey:@"dictionary"][@"value"];
   XCTAssertEqual([snapshot[@"records"] count], 256u);
   XCTAssertEqualObjects(snapshot[@"dropped_records"], @1);
+}
+
+@end
+
+@interface FBGestureScheduleTests : XCTestCase
+@end
+
+@implementation FBGestureScheduleTests
+
+- (NSDictionary *)gestureAt:(double)startMs durations:(NSArray<NSNumber *> *)durations
+{
+  NSMutableArray *waypoints = [NSMutableArray arrayWithObject:@{@"x": @100, @"y": @200}];
+  for (NSUInteger i = 0; i < durations.count; i++) {
+    [waypoints addObject:@{@"x": @(100 + 10 * (i + 1)), @"y": @(200 + 5 * (i + 1)), @"duration_ms": durations[i]}];
+  }
+  return @{@"start_ms": @(startMs), @"waypoints": waypoints};
+}
+
+- (void)testRouteIsRegistered
+{
+  NSArray<NSString *> *paths = [[FBTrickGestureCommands routes] valueForKey:@"path"];
+  XCTAssertTrue([paths containsObject:@"/wda/perform_gesture_schedule"]);
+}
+
+- (void)testPlanKeepsEachGestureSeparateWithCumulativeOffsets
+{
+  NSString *error = nil;
+  NSArray *plan = [FBTrickGestureCommands gestureSchedulePlanFromArguments:@{@"gestures": @[
+    [self gestureAt:0 durations:@[@20, @30]],
+    [self gestureAt:168 durations:@[@50]],
+  ]} errorMessage:&error];
+  XCTAssertNil(error);
+  XCTAssertEqual(plan.count, 2);
+  XCTAssertEqualWithAccuracy([plan[1][@"start_s"] doubleValue], 0.168, 1e-9);
+  NSArray<NSNumber *> *offsets = plan[0][@"offsets_s"];
+  XCTAssertEqualWithAccuracy(offsets[0].doubleValue, 0, 1e-9);
+  XCTAssertEqualWithAccuracy(offsets[1].doubleValue, 0.020, 1e-9);
+  XCTAssertEqualWithAccuracy(offsets[2].doubleValue, 0.050, 1e-9);
+  XCTAssertTrue(CGPointEqualToPoint([plan[0][@"points"][2] CGPointValue], CGPointMake(120, 210)));
+}
+
+- (void)testPlanRejectsInvalidBodies
+{
+  NSArray *invalid = @[
+    @{},
+    @{@"gestures": @[]},
+    @{@"gestures": @[@{@"waypoints": @[@{@"x": @1, @"y": @1}, @{@"x": @2, @"y": @2, @"duration_ms": @10}]}]},
+    @{@"gestures": @[@{@"start_ms": @-1, @"waypoints": @[@{@"x": @1, @"y": @1}, @{@"x": @2, @"y": @2, @"duration_ms": @10}]}]},
+    @{@"gestures": @[@{@"start_ms": @0, @"waypoints": @[@{@"x": @1, @"y": @1}]}]},
+    @{@"gestures": @[@{@"start_ms": @0, @"waypoints": @[@{@"x": @1, @"y": @1}, @{@"x": @2, @"y": @2, @"duration_ms": @0}]}]},
+    @{@"gestures": @[@{@"start_ms": @0, @"waypoints": @[@{@"x": @1, @"y": @1}, @{@"x": @2, @"duration_ms": @10}]}]},
+  ];
+  for (NSDictionary *body in invalid) {
+    NSString *error = nil;
+    XCTAssertNil([FBTrickGestureCommands gestureSchedulePlanFromArguments:body errorMessage:&error], @"%@", body);
+    XCTAssertNotNil(error, @"%@", body);
+  }
 }
 
 @end

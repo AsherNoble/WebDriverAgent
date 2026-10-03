@@ -44,3 +44,16 @@ viewport- and pointer-origin points arithmetically from it. Element origins and
 non-portrait orientations keep the original per-item resolution. Synthesized
 points are unchanged; `testMultiPointPathMatchesCoordinateResolution` compares
 them against per-item `XCUICoordinate` resolution.
+
+## Scheduled gestures
+
+`POST /wda/perform_gesture_schedule` (no session) takes
+`{"gestures": [{"start_ms": 0, "waypoints": [{"x": .., "y": ..}, {"x": .., "y": .., "duration_ms": ..}, ...]}]}`
+in logical points. Each gesture becomes its own `XCSynthesizedEventRecord` with one
+pointer path, submitted from the main run loop at `start_ms` after the request
+without waiting for earlier records to complete. Sequential touch contacts must
+never share a record: extra paths run as parallel tracks and hover moves emit
+touches, so True Skate draws one joined chain. Separate HTTP requests avoid that,
+but each returns ~0.3 s after its gesture. The response reports each gesture's
+`scheduled_s`, `submitted_s` and `completed_s` relative to `base_monotonic_s`
+(phone system uptime) and whether all records completed.

@@ -13,6 +13,17 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @interface FBTrickGestureCommands : NSObject <FBCommandHandler>
+
+/**
+ Validate a /wda/perform_gesture_schedule body.
+
+ Each returned entry has `start_s` (NSNumber), `points` (NSArray of CGPoint NSValues)
+ and `offsets_s` (NSArray of NSNumber, seconds from the gesture's touch-down).
+ Returns nil and sets errorMessage when the body is invalid.
+ */
++ (nullable NSArray<NSDictionary<NSString *, id> *> *)gestureSchedulePlanFromArguments:(NSDictionary *)arguments
+                                                                         errorMessage:(NSString *_Nullable *_Nullable)errorMessage;
+
 @end
 
 NS_ASSUME_NONNULL_END

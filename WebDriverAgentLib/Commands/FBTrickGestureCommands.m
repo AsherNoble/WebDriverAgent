@@ -131,7 +131,10 @@
     [timings addObject:timing];
     XCSynthesizedEventRecord *record = records[i];
     double delay = base + [plan[i][@"start_s"] doubleValue] - NSProcessInfo.processInfo.systemUptime;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MAX(0, delay) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Run-loop timers, not dispatch_after on the main queue: this handler itself
+    // runs as a main-queue block, so queued main-queue blocks would wait for it to
+    // return. Timers fire while the spinner below runs this thread's run loop.
+    NSTimer *timer = [NSTimer timerWithTimeInterval:MAX(0, delay) repeats:NO block:^(NSTimer *t) {
       @synchronized (lock) { timing[@"submitted_s"] = @(NSProcessInfo.processInfo.systemUptime - base); }
       [eventSynthesizer synthesizeEvent:record completion:(id)^(BOOL result, NSError *invokeError) {
         @synchronized (lock) {
@@ -141,7 +144,9 @@
           completed++;
         }
       }];
-    });
+    }];
+    timer.tolerance = 0;
+    [NSRunLoop.currentRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
   }
   BOOL finished = [[[[FBRunLoopSpinner new] timeout:lastEnd + 10.0] interval:0.005] spinUntilTrue:^BOOL{
     @synchronized (lock) { return completed == records.count; }

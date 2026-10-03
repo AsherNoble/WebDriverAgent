@@ -43,6 +43,11 @@
 
 @implementation FBBaseGestureItem
 
+- (CGPoint)eventScreenPoint
+{
+  return nil == self.resolvedScreenPoint ? self.atPosition.screenPoint : self.resolvedScreenPoint.CGPointValue;
+}
+
 - (nullable XCUICoordinate *)hitpointWithElement:(nullable XCUIElement *)element
                                   positionOffset:(nullable NSValue *)positionOffset
                                            error:(NSError **)error

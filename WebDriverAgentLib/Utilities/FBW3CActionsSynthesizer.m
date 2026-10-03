@@ -64,9 +64,60 @@ static NSString *const FB_KEY_ACTIONS = @"actions";
 
 
 #if !TARGET_OS_TV
+/**
+ Resolves the application's screen origin at most once per synthesized request.
+
+ Resolving an XCUICoordinate's screen point requests an accessibility snapshot of
+ the application. Doing that for every pointer move made request preparation grow
+ with the number of moves (seconds for a 15-point drag in a busy app). In portrait,
+ a viewport offset is a plain screen-point offset from this origin.
+ */
+@interface FBW3CViewportOrigin : NSObject
+
+- (instancetype)initWithApplication:(XCUIApplication *)application;
+- (CGPoint)screenPointWithOffset:(CGPoint)offset;
+
+@end
+
+@implementation FBW3CViewportOrigin
+{
+  XCUIApplication *_application;
+  NSValue *_origin;
+}
+
+- (instancetype)initWithApplication:(XCUIApplication *)application
+{
+  self = [super init];
+  if (self) {
+    _application = application;
+  }
+  return self;
+}
+
+- (CGPoint)screenPointWithOffset:(CGPoint)offset
+{
+  if (nil == _origin) {
+    _origin = [NSValue valueWithCGPoint:[_application coordinateWithNormalizedOffset:CGVectorMake(0, 0)].screenPoint];
+  }
+  CGPoint origin = _origin.CGPointValue;
+  return CGPointMake(origin.x + offset.x, origin.y + offset.y);
+}
+
+@end
+
+
 @interface FBW3CGestureItem : FBBaseGestureItem
 
 @property (nullable, readonly, nonatomic) FBBaseGestureItem *previousItem;
+/*! Shared per-request origin; nil means resolve every position through XCUICoordinate */
+@property (nullable, readonly, nonatomic) FBW3CViewportOrigin *viewportOrigin;
+
+- (nullable instancetype)initWithActionItem:(NSDictionary<NSString *, id> *)actionItem
+                                application:(XCUIApplication *)application
+                               previousItem:(nullable FBBaseGestureItem *)previousItem
+                             viewportOrigin:(nullable FBW3CViewportOrigin *)viewportOrigin
+                                     offset:(double)offset
+                                      error:(NSError **)error;
 
 @end
 
@@ -118,6 +169,7 @@ static NSString *const FB_KEY_ACTIONS = @"actions";
 - (nullable instancetype)initWithActionItem:(NSDictionary<NSString *, id> *)actionItem
                                 application:(XCUIApplication *)application
                                previousItem:(nullable FBBaseGestureItem *)previousItem
+                             viewportOrigin:(nullable FBW3CViewportOrigin *)viewportOrigin
                                      offset:(double)offset
                                       error:(NSError **)error
 {
@@ -127,30 +179,32 @@ static NSString *const FB_KEY_ACTIONS = @"actions";
     self.application = application;
     self.offset = offset;
     _previousItem = previousItem;
+    _viewportOrigin = viewportOrigin;
     NSNumber *durationObj = FBOptDuration(actionItem, @0, error);
     if (nil == durationObj) {
       return nil;
     }
     self.duration = durationObj.doubleValue;
-    XCUICoordinate *position = [self positionWithError:error];
-    if (nil == position) {
+    if (![self resolvePositionWithError:error]) {
       return nil;
     }
-    self.atPosition = position;
   }
   return self;
 }
 
-- (nullable XCUICoordinate *)positionWithError:(NSError **)error
+/*! Sets atPosition or resolvedScreenPoint */
+- (BOOL)resolvePositionWithError:(NSError **)error
 {
   if (nil == self.previousItem) {
     NSString *errorDescription = [NSString stringWithFormat:@"The '%@' action item must be preceded by %@ item", self.actionItem, FB_ACTION_ITEM_TYPE_POINTER_MOVE];
     if (error) {
       *error = [[FBErrorBuilder.builder withDescription:errorDescription] build];
     }
-    return nil;
+    return NO;
   }
-  return self.previousItem.atPosition;
+  self.atPosition = self.previousItem.atPosition;
+  self.resolvedScreenPoint = self.previousItem.resolvedScreenPoint;
+  return YES;
 }
 
 - (nullable XCUICoordinate *)hitpointWithElement:(nullable XCUIElement *)element
@@ -184,11 +238,12 @@ static NSString *const FB_KEY_ACTIONS = @"actions";
 
 - (nullable instancetype)initWithActionItem:(NSDictionary<NSString *, id> *)actionItem
                                 application:(XCUIApplication *)application
-                               previousItem:(nullable FBW3CGestureItem *)previousItem
+                               previousItem:(nullable FBBaseGestureItem *)previousItem
+                             viewportOrigin:(nullable FBW3CViewportOrigin *)viewportOrigin
                                      offset:(double)offset
                                       error:(NSError **)error
 {
-  self = [super initWithActionItem:actionItem application:application previousItem:previousItem offset:offset error:error];
+  self = [super initWithActionItem:actionItem application:application previousItem:previousItem viewportOrigin:viewportOrigin offset:offset error:error];
   if (self) {
     _pressure = [actionItem objectForKey:FB_ACTION_ITEM_KEY_PRESSURE];
   }
@@ -212,7 +267,7 @@ static NSString *const FB_KEY_ACTIONS = @"actions";
     }
   }
   if (nil == self.pressure) {
-    XCPointerEventPath *result = [[XCPointerEventPath alloc] initForTouchAtPoint:self.atPosition.screenPoint
+    XCPointerEventPath *result = [[XCPointerEventPath alloc] initForTouchAtPoint:self.eventScreenPoint
                                                                           offset:FBMillisToSeconds(self.offset)];
     return @[result];
   }
@@ -238,6 +293,35 @@ static NSString *const FB_KEY_ACTIONS = @"actions";
 @end
 
 @implementation FBPointerMoveItem
+
+- (BOOL)resolvePositionWithError:(NSError **)error
+{
+  id origin = [self.actionItem objectForKey:FB_ACTION_ITEM_KEY_ORIGIN] ?: FB_ORIGIN_TYPE_VIEWPORT;
+  NSNumber *x = [self.actionItem objectForKey:FB_ACTION_ITEM_KEY_X];
+  NSNumber *y = [self.actionItem objectForKey:FB_ACTION_ITEM_KEY_Y];
+  BOOL isViewport = [origin isKindOfClass:NSString.class] && [origin isEqualToString:FB_ORIGIN_TYPE_VIEWPORT];
+  BOOL isPointer = [origin isKindOfClass:NSString.class] && [origin isEqualToString:FB_ORIGIN_TYPE_POINTER];
+  BOOL hasOffset = nil != x && nil != y;
+  // Fast path: compute the screen point arithmetically, with no per-item app snapshot.
+  // Invalid items fall through to the original validation and error reporting.
+  if (nil != self.viewportOrigin && isViewport && hasOffset) {
+    self.resolvedScreenPoint = [NSValue valueWithCGPoint:[self.viewportOrigin screenPointWithOffset:CGPointMake(x.floatValue, y.floatValue)]];
+    return YES;
+  }
+  if (nil != self.viewportOrigin && isPointer && nil != self.previousItem.resolvedScreenPoint
+      && (hasOffset || (nil == x && nil == y))) {
+    CGPoint recent = self.previousItem.resolvedScreenPoint.CGPointValue;
+    CGPoint offset = hasOffset ? CGPointMake(x.floatValue, y.floatValue) : CGPointZero;
+    self.resolvedScreenPoint = [NSValue valueWithCGPoint:CGPointMake(recent.x + offset.x, recent.y + offset.y)];
+    return YES;
+  }
+  XCUICoordinate *position = [self positionWithError:error];
+  if (nil == position) {
+    return NO;
+  }
+  self.atPosition = position;
+  return YES;
+}
 
 - (nullable XCUICoordinate *)positionWithError:(NSError **)error
 {
@@ -303,10 +387,10 @@ static NSString *const FB_KEY_ACTIONS = @"actions";
                                             error:(NSError **)error
 {
   if (nil == eventPath) {
-    return @[[[XCPointerEventPath alloc] initForTouchAtPoint:self.atPosition.screenPoint
+    return @[[[XCPointerEventPath alloc] initForTouchAtPoint:self.eventScreenPoint
                                                       offset:FBMillisToSeconds(self.offset + self.duration)]];
   }
-  [eventPath moveToPoint:self.atPosition.screenPoint
+  [eventPath moveToPoint:self.eventScreenPoint
                 atOffset:FBMillisToSeconds(self.offset + self.duration)];
   return @[];
 }
@@ -619,6 +703,13 @@ static NSString *const FB_KEY_ACTIONS = @"actions";
 @end
 
 
+@interface FBW3CActionsSynthesizer ()
+
+/*! Created per synthesizeWithError: call; nil outside portrait */
+@property (nullable, nonatomic) FBW3CViewportOrigin *viewportOrigin;
+
+@end
+
 @implementation FBW3CActionsSynthesizer
 
 - (NSArray<NSDictionary<NSString *, id> *> *)preprocessedActionItemsWith:(NSArray<NSDictionary<NSString *, id> *> *)actionItems
@@ -798,7 +889,7 @@ static NSString *const FB_KEY_ACTIONS = @"actions";
       return nil;
     }
 
-    FBW3CGestureItem *gestureItem = [[gestureItemClass alloc] initWithActionItem:actionItem application:self.application previousItem:[chain.items lastObject] offset:chain.durationOffset error:error];
+    FBW3CGestureItem *gestureItem = [[gestureItemClass alloc] initWithActionItem:actionItem application:self.application previousItem:[chain.items lastObject] viewportOrigin:self.viewportOrigin offset:chain.durationOffset error:error];
     if (nil == gestureItem) {
       return nil;
     }
@@ -831,9 +922,14 @@ static NSString *const FB_KEY_ACTIONS = @"actions";
 
 - (nullable XCSynthesizedEventRecord *)synthesizeWithError:(NSError **)error
 {
+  UIInterfaceOrientation orientation = self.application.interfaceOrientation;
   XCSynthesizedEventRecord *eventRecord = [[XCSynthesizedEventRecord alloc]
                                            initWithName:@"W3C Touch Action"
-                                           interfaceOrientation:self.application.interfaceOrientation];
+                                           interfaceOrientation:orientation];
+  // Viewport offsets equal screen-point offsets from the app origin only in portrait
+  self.viewportOrigin = UIInterfaceOrientationPortrait == orientation
+    ? [[FBW3CViewportOrigin alloc] initWithApplication:self.application]
+    : nil;
   NSMutableDictionary<NSString *, NSDictionary<NSString *, id> *> *actionsMapping = [NSMutableDictionary new];
   NSMutableArray<NSString *> *actionIds = [NSMutableArray new];
   for (NSDictionary<NSString *, id> *action in self.actions) {

@@ -17,6 +17,10 @@
 #import "XCUIDevice+FBRotation.h"
 #import "FBRunLoopSpinner.h"
 #import "FBXCodeCompatibility.h"
+#import "FBW3CActionsSynthesizer.h"
+#import "XCPointerEvent.h"
+#import "XCPointerEventPath.h"
+#import "XCSynthesizedEventRecord.h"
 
 @interface FBW3CTouchActionsIntegrationTestsPart1 : FBIntegrationTestCase
 @end
@@ -279,6 +283,58 @@
   NSError *error;
   XCTAssertTrue([self.testedApplication fb_performW3CActions:gesture elementCache:nil error:&error]);
   XCTAssertNil(error);
+}
+
+- (void)testMultiPointPathMatchesCoordinateResolution
+{
+  // A 15-point viewport path followed by pointer-origin moves. Expected points are
+  // resolved one XCUICoordinate at a time, as WDA did before the per-request origin.
+  NSMutableArray<NSDictionary<NSString *, id> *> *items = [NSMutableArray array];
+  NSMutableArray<NSValue *> *expected = [NSMutableArray array];
+  XCUICoordinate *appOrigin = [self.testedApplication coordinateWithNormalizedOffset:CGVectorMake(0, 0)];
+  XCUICoordinate *last = nil;
+  for (NSInteger i = 0; i < 15; i++) {
+    CGFloat x = 40 + 17 * i;
+    CGFloat y = 120 + 23 * i - (i % 3) * 11;
+    [items addObject:@{@"type": @"pointerMove", @"duration": i == 0 ? @0 : @20, @"x": @(x), @"y": @(y)}];
+    if (i == 0) {
+      [items addObject:@{@"type": @"pointerDown"}];
+    }
+    last = [appOrigin coordinateWithOffset:CGVectorMake(x, y)];
+    [expected addObject:[NSValue valueWithCGPoint:last.screenPoint]];
+  }
+  [items addObject:@{@"type": @"pointerMove", @"duration": @20, @"origin": @"pointer", @"x": @5, @"y": @-7}];
+  last = [last coordinateWithOffset:CGVectorMake(5, -7)];
+  [expected addObject:[NSValue valueWithCGPoint:last.screenPoint]];
+  [items addObject:@{@"type": @"pointerMove", @"duration": @20, @"origin": @"pointer", @"x": @-12, @"y": @9}];
+  last = [last coordinateWithOffset:CGVectorMake(-12, 9)];
+  [expected addObject:[NSValue valueWithCGPoint:last.screenPoint]];
+  [items addObject:@{@"type": @"pointerUp"}];
+
+  NSError *error;
+  FBW3CActionsSynthesizer *synthesizer = [[FBW3CActionsSynthesizer alloc]
+                                          initWithActions:@[@{@"type": @"pointer",
+                                                              @"id": @"finger1",
+                                                              @"parameters": @{@"pointerType": @"touch"},
+                                                              @"actions": items}]
+                                          forApplication:self.testedApplication
+                                          elementCache:nil
+                                          error:&error];
+  XCSynthesizedEventRecord *record = [synthesizer synthesizeWithError:&error];
+  XCTAssertNil(error);
+  XCTAssertEqual(record.eventPaths.count, 1);
+  NSMutableArray<NSValue *> *actual = [NSMutableArray array];
+  for (XCPointerEvent *event in ((XCPointerEventPath *)record.eventPaths.firstObject).pointerEvents) {
+    NSValue *point = [NSValue valueWithCGPoint:event.coordinate];
+    if (![actual.lastObject isEqualToValue:point]) {
+      [actual addObject:point];
+    }
+  }
+  XCTAssertGreaterThanOrEqual(actual.count, expected.count);
+  for (NSUInteger i = 0; i < expected.count && i < actual.count; i++) {
+    XCTAssertEqualWithAccuracy(actual[i].CGPointValue.x, expected[i].CGPointValue.x, 1e-6, @"point %lu", (unsigned long)i);
+    XCTAssertEqualWithAccuracy(actual[i].CGPointValue.y, expected[i].CGPointValue.y, 1e-6, @"point %lu", (unsigned long)i);
+  }
 }
 
 - (void)testTap

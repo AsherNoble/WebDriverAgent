@@ -49,10 +49,17 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface FBBaseGestureItem : FBBaseActionItem
 
-/*! Absolute position on the screen where the gesure should be performed */
-@property (nonatomic) XCUICoordinate *atPosition;
+/*! Absolute position on the screen where the gesure should be performed. Nil when resolvedScreenPoint is set */
+@property (nonatomic, nullable) XCUICoordinate *atPosition;
+/*! Screen point computed without resolving an XCUICoordinate (each resolution requests an app snapshot) */
+@property (nonatomic, nullable) NSValue *resolvedScreenPoint;
 /*! Gesture duration in milliseconds */
 @property (nonatomic) double duration;
+
+/**
+ The screen point of the gesture: resolvedScreenPoint if set, otherwise atPosition's screen point.
+ */
+- (CGPoint)eventScreenPoint;
 
 /**
  Calculate absolute gesture position on the screen based on provided element and positionOffset values.

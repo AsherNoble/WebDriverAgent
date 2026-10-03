@@ -32,3 +32,15 @@ perturb timing and must itself be validated.
 Deploy only after signed instrumented and baseline builds are available. Keep
 separate derived-data directories and preserve the existing XR2 build. Do not
 stop working WDA merely to discover a signing failure. Collection remains off.
+
+## Viewport point resolution
+
+Resolving an `XCUICoordinate` screen point requests an accessibility snapshot of
+the application. Upstream WDA resolved one coordinate per W3C pointer item, so
+preparation grew with the number of moves: a 15-point True Skate drag spent
+3.75 s preparing, with individual snapshots stalling for seconds. In portrait,
+this fork resolves the application origin once per request and computes
+viewport- and pointer-origin points arithmetically from it. Element origins and
+non-portrait orientations keep the original per-item resolution. Synthesized
+points are unchanged; `testMultiPointPathMatchesCoordinateResolution` compares
+them against per-item `XCUICoordinate` resolution.

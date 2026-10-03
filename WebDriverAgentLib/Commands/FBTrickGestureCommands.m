@@ -94,12 +94,56 @@
   return plan.copy;
 }
 
+/*
+ Experimental "paths" mode: one record, one path per gesture, each with its own
+ finger index and absolute start offset. XCTest refuses a second record until the
+ previous one completes (~0.25 s after its last event: "only one gesture can be
+ performed at a time"), so separate records cannot be closer than that. Earlier
+ multi-path attempts left every path at index 0, which plausibly makes the game
+ see one finger and join the gestures.
+ */
++ (id<FBResponsePayload>)performScheduleAsIndexedPaths:(NSArray<NSDictionary<NSString *, id> *> *)plan
+{
+  XCSynthesizedEventRecord *record = [[XCSynthesizedEventRecord alloc] initWithName:@"ScheduledGesturePaths"
+                                                                interfaceOrientation:UIInterfaceOrientationPortrait];
+  for (NSUInteger g = 0; g < plan.count; g++) {
+    double start = [plan[g][@"start_s"] doubleValue];
+    NSArray<NSValue *> *points = plan[g][@"points"];
+    NSArray<NSNumber *> *offsets = plan[g][@"offsets_s"];
+    XCPointerEventPath *path = [[XCPointerEventPath alloc] initForTouchAtPoint:points.firstObject.CGPointValue offset:start];
+    path.index = g;
+    for (NSUInteger i = 1; i < points.count; i++) {
+      [path moveToPoint:points[i].CGPointValue atOffset:start + offsets[i].doubleValue];
+    }
+    [path liftUpAtOffset:start + offsets.lastObject.doubleValue];
+    [record addPointerEventPath:path];
+  }
+  NSTimeInterval submitted = NSProcessInfo.processInfo.systemUptime;
+  NSError *error = nil;
+  BOOL ok = [FBXCTestDaemonsProxy synthesizeEventWithRecord:record error:&error];
+  return FBResponseWithObject(@{
+    @"mode": @"paths",
+    @"complete": @(ok),
+    @"base_monotonic_s": @(submitted),
+    @"completed_s": @(NSProcessInfo.processInfo.systemUptime - submitted),
+    @"error": error.localizedDescription ?: NSNull.null,
+  });
+}
+
 + (id<FBResponsePayload>)handlePerformGestureSchedule:(FBRouteRequest *)request
 {
   NSString *problem = nil;
   NSArray<NSDictionary<NSString *, id> *> *plan = [self gestureSchedulePlanFromArguments:request.arguments errorMessage:&problem];
   if (nil == plan) {
     return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:problem traceback:nil]);
+  }
+
+  id mode = request.arguments[@"mode"] ?: @"records";
+  if ([mode isEqual:@"paths"]) {
+    return [self performScheduleAsIndexedPaths:plan];
+  }
+  if (![mode isEqual:@"records"]) {
+    return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:@"'mode' must be 'records' or 'paths'" traceback:nil]);
   }
 
   NSMutableArray<XCSynthesizedEventRecord *> *records = [NSMutableArray array];
